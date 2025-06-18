@@ -1,10 +1,7 @@
 #!/bin/bash
 #####################################################################################
-# FreePBX 17 Rocky Linux 9.6 설치 스크립트
-# Copyright 2024 by Sangoma Technologies (변환: Rocky Linux 9.6)
-# 본 스크립트는 GPL v3 라이선스를 따릅니다.
-#####################################################################################
-#                                               FreePBX 17                          #
+# * Copyright 2024 by Sangoma Technologies
+# Rocky Linux 9.6용 FreePBX 17 설치 스크립트
 #####################################################################################
 set -e
 SCRIPTVER="1.0-rocky"
@@ -13,366 +10,637 @@ PHPVERSION="8.2"
 LOG_FOLDER="/var/log/pbx"
 LOG_FILE="${LOG_FOLDER}/freepbx17-install-$(date '+%Y.%m.%d-%H.%M.%S').log"
 log=$LOG_FILE
-SANE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+NPM_MIRROR=""
 
-# 루트 권한 체크
+# Check for root privileges
 if [[ $EUID -ne 0 ]]; then
-   echo "이 스크립트는 root 권한으로 실행해야 합니다."
+   echo "This script must be run as root"
    exit 1
 fi
 
-# PATH 설정
-export PATH=$SANE_PATH
+# 로그 함수 (영어)
+log() {
+  echo "$(date +"%Y-%m-%d %T") - $*" >> "$LOG_FILE"
+}
 
-# 명령행 옵션 처리
+message() {
+  echo "$(date +"%Y-%m-%d %T") - $*"
+  log "$*"
+}
+
+# 옵션 파싱
 while [[ $# -gt 0 ]]; do
-	case $1 in
-		--dev)
-			dev=true
-			shift
-			;;
-		--testing)
-			testrepo=true
-			shift
-			;;
-		--nofreepbx)
-			nofpbx=true
-			shift
-			;;
-		--noasterisk)
-			noast=true
-			shift
-			;;
-		--opensourceonly)
-			opensourceonly=true
-			shift
-			;;
-		--noaac)
-			noaac=true
-			shift
-			;;
-		--dahdi)
-			dahdi=true
-			shift
-			;;
-		--dahdi-only)
-			nofpbx=true
-			noast=true
-			noaac=true
-			dahdi=true
-			shift
-			;;
-		--nochrony)
-			nochrony=true
-			shift
-			;;
-		--npmmirror)
-			NPM_MIRROR=$2
-			shift; shift
-			;;
-		-*)
-			echo "알 수 없는 옵션 $1"
-			exit 1
-			;;
-		*)
-			echo "알 수 없는 인수 \"$1\""
-			exit 1
-			;;
-	esac
+  case $1 in
+    --dev)
+      dev=true
+      shift
+      ;;
+    --testing)
+      testrepo=true
+      shift
+      ;;
+    --nofreepbx)
+      nofpbx=true
+      shift
+      ;;
+    --noasterisk)
+      noast=true
+      shift
+      ;;
+    --opensourceonly)
+      opensourceonly=true
+      shift
+      ;;
+    --noaac)
+      noaac=true
+      shift
+      ;;
+    --skipversion)
+      skipversion=true
+      shift
+      ;;
+    --dahdi)
+      dahdi=true
+      shift
+      ;;
+    --dahdi-only)
+      nofpbx=true
+      noast=true
+      noaac=true
+      dahdi=true
+      shift
+      ;;
+    --nochrony)
+      nochrony=true
+      shift
+      ;;
+    --npmmirror)
+      NPM_MIRROR=$2
+      shift; shift
+      ;;
+    *)
+      echo "Unknown argument \"$1\""
+      exit 1
+      ;;
+  esac
 done
 
 # 로그 폴더 및 파일 생성
 mkdir -p "${LOG_FOLDER}"
 touch "${LOG_FILE}"
 
-# 표준 에러를 로그 파일로 리다이렉트
+# stderr 로그파일로 리다이렉트
 exec 2>>"${LOG_FILE}"
 
-# 로그 함수
-log() {
-	echo "$(date +"%Y-%m-%d %T") - $*" >> "$LOG_FILE"
-}
-
-message() {
-	echo "$(date +"%Y-%m-%d %T") - $*"
-	log "$*"
-}
-
-# 현재 단계 설정 함수
-setCurrentStep () {
-	currentStep="$1"
-	message "${currentStep}"
-}
-
-# 설치 정리 함수
-terminate() {
-	message "스크립트 종료"
-	rm -f "$pidfile"
-}
-
-# 오류 처리 함수
-errorHandler() {
-	log "****** 설치 실패 *****"
-	message "설치가 ${currentStep} 단계에서 실패했습니다. 자세한 내용은 로그 ${LOG_FILE}를 확인하세요."
-	message "오류 위치: $1, 종료 코드: $2 (마지막 명령: $3)"
-	exit "$2"
-}
-
-# 패키지 설치 확인 함수
-isinstalled() {
-	if rpm -q "$@" >/dev/null 2>&1; then
-		true
-	else
-		false
-	fi
-}
-
-# 패키지 설치 함수
-pkg_install() {
-    log "############################### "
-    PKG=("$@")
-    if isinstalled "${PKG[@]}"; then
-        log "${PKG[*]} 이미 설치됨 ...."
+# Rocky Linux용 패키지 설치 함수
+yum_install() {
+  PKG=("$@")
+  if rpm -q "${PKG[@]}" &>/dev/null; then
+    log "${PKG[*]} already present ...."
+  else
+    message "Installing ${PKG[*]} ...."
+    dnf install -y "${PKG[@]}" >> "$log"
+    if rpm -q "${PKG[@]}" &>/dev/null; then
+      message "${PKG[*]} installed successfully...."
     else
-        message "설치 중: ${PKG[*]} ...."
-        dnf install -y "${PKG[@]}" >> "$log"
-        if isinstalled "${PKG[@]}"; then
-            message "${PKG[*]} 설치 성공...."
-        else
-            message "${PKG[*]} 설치 실패...."
-            message "의존 패키지 ${PKG[*]} 설치 실패로 설치 프로세스를 종료합니다...."
-            terminate
-        fi
+      message "${PKG[*]} failed to install ...."
+      message "Exiting the installation process as dependent ${PKG[*]} failed to install ...."
+      exit 1
     fi
-    log "############################### "
+  fi
+  log "############################### "
 }
 
-# Asterisk 설치 함수
+# Comparing version
+compare_version() {
+  if rpm --compare-versions "$1" "gt" "$2"; then
+    result=0
+  elif rpm --compare-versions "$1" "lt" "$2"; then
+    result=1
+  else
+    result=2
+  fi
+}
+
+check_version() {
+  # Fetching latest version and checksum
+  REPO_URL="https://github.com/FreePBX/sng_freepbx_rocky_install/raw/master"
+  wget -O /tmp/sng_freepbx_rocky_install_latest_from_github.sh "$REPO_URL/sng_freepbx_rocky_install.sh" >> "$log"
+
+  latest_version=$(grep '^SCRIPTVER="' /tmp/sng_freepbx_rocky_install_latest_from_github.sh | awk -F'"' '{print $2}')
+  latest_checksum=$(sha256sum /tmp/sng_freepbx_rocky_install_latest_from_github.sh | awk '{print $1}')
+
+  # Cleaning up downloaded file
+  rm -f /tmp/sng_freepbx_rocky_install_latest_from_github.sh
+
+  compare_version $SCRIPTVER "$latest_version"
+
+  case $result in
+    0)
+      echo "Your version ($SCRIPTVER) of installation script is ahead of the latest version ($latest_version) as present on the GitHub. We recommend you to Download the version present in the GitHub."
+      echo "Use '$0 --skipversion' to skip the version check"
+      exit 1
+      ;;
+    1)
+      echo "A newer version ($latest_version) of installation script is available on GitHub. We recommend you to update it or use the latest one from the GitHub."
+      echo "Use '$0 --skipversion' to skip the version check."
+      exit 0
+      ;;
+    2)
+      local_checksum=$(sha256sum "$0" | awk '{print $1}')
+      if [[ "$latest_checksum" != "$local_checksum" ]]; then
+        echo "Changes are detected between the local installation script and the latest installation script as present on GitHub. We recommend you to please use the latest installation script as present on GitHub."
+        echo "Use '$0 --skipversion' to skip the version check"
+        exit 0
+      else
+        echo "Perfect! You're already running the latest version."
+      fi
+      ;;
+  esac
+}
+
+# Function to record and display the current step
+setCurrentStep () {
+  currentStep="$1"
+  message "${currentStep}"
+}
+
+# Function to cleanup installation
+terminate() {
+  # removing pid file
+  message "Exiting script"
+  rm -f "$pidfile"
+}
+
+# Function to log error and location
+errorHandler() {
+  log "****** INSTALLATION FAILED *****"
+  message "Installation failed at step ${currentStep}. Please check log ${LOG_FILE} for details."
+  message "Error at line: $1 exiting with code $2 (last command was: $3)"
+  exit "$2"
+}
+
+# Function to install the asterisk and dependent packages
 install_asterisk() {
-	astver=$1
-	ASTPKGS=("addons"
-		"addons-bluetooth"
-		"addons-core"
-		"addons-mysql"
-		"addons-ooh323"
-		"core"
-		"curl"
-		"dahdi"
-		"doc"
-		"odbc"
-		"ogg"
-		"flite"
-		"g729"
-		"resample"
-		"snmp"
-		"speex"
-		"sqlite3"
-		"res-digium-phone"
-		"voicemail"
-	)
+  astver=$1
+  ASTPKGS=("addons"
+    "addons-bluetooth"
+    "addons-core"
+    "addons-mysql"
+    "addons-ooh323"
+    "core"
+    "curl"
+    "dahdi"
+    "doc"
+    "odbc"
+    "ogg"
+    "flite"
+    "g729"
+    "resample"
+    "snmp"
+    "speex"
+    "sqlite3"
+    "res-digium-phone"
+    "voicemail"
+  )
 
-	# 디렉토리 생성
-	mkdir -p /var/lib/asterisk/moh
-	pkg_install asterisk"$astver"
+  # creating directories
+  mkdir -p /var/lib/asterisk/moh
+  yum_install asterisk"$astver"
 
-	for i in "${!ASTPKGS[@]}"; do
-		pkg_install asterisk"$astver"-"${ASTPKGS[$i]}"
-	done
+  for i in "${!ASTPKGS[@]}"; do
+    yum_install asterisk"$astver"-"${ASTPKGS[$i]}"
+  done
 
-	pkg_install asterisk"$astver".0-freepbx-asterisk-modules
-	pkg_install asterisk-version-switch
-	pkg_install asterisk-sounds-*
+  yum_install asterisk"$astver".0-freepbx-asterisk-modules
+  yum_install asterisk-version-switch
+  yum_install asterisk-sounds-*
 }
 
-# 저장소 설정 함수
 setup_repositories() {
-	# EPEL 저장소 추가
-	dnf install -y epel-release >> "$log"
-	
-	# Remi 저장소 추가 (PHP 8.2용)
-	dnf install -y https://rpms.remirepo.net/enterprise/remi-release-9.rpm >> "$log"
-	
-	# FreePBX 저장소 추가
-	if [ "$testrepo" ] ; then
-		# 테스트 저장소 (실제로는 Sangoma에서 제공하는 저장소 URL로 변경 필요)
-		cat <<EOF > /etc/yum.repos.d/freepbx-test.repo
-[freepbx-test]
-name=FreePBX Test Repository
+  # Import FreePBX GPG key
+  rpm --import http://deb.freepbx.org/gpg/aptly-pubkey.asc >> "$log"
+
+  # Setting our default repo server
+  if [ "$testrepo" ] ; then
+    cat <<EOF > /etc/yum.repos.d/freepbx17-dev.repo
+[freepbx17-dev]
+name=FreePBX 17 Development Repository
 baseurl=http://deb.freepbx.org/freepbx17-dev/el9/\$basearch/
 enabled=1
-gpgcheck=0
+gpgcheck=1
+gpgkey=http://deb.freepbx.org/gpg/aptly-pubkey.asc
+priority=1
 EOF
-	else
-		# 프로덕션 저장소
-		cat <<EOF > /etc/yum.repos.d/freepbx-prod.repo
-[freepbx-prod]
-name=FreePBX Production Repository
+  else
+    cat <<EOF > /etc/yum.repos.d/freepbx17-prod.repo
+[freepbx17-prod]
+name=FreePBX 17 Production Repository
 baseurl=http://deb.freepbx.org/freepbx17-prod/el9/\$basearch/
 enabled=1
-gpgcheck=0
+gpgcheck=1
+gpgkey=http://deb.freepbx.org/gpg/aptly-pubkey.asc
+priority=1
 EOF
-	fi
+  fi
 
-	if [ ! "$noaac" ] ; then
-		# RPM Fusion 저장소 추가 (ffmpeg용)
-		dnf install -y https://download1.rpmfusion.org/free/el/rpmfusion-free-release-9.noarch.rpm >> "$log"
-	fi
+  if [ ! "$noaac" ] ; then
+    # Enable EPEL and CodeReady Builder repositories
+    dnf install -y epel-release >> "$log"
+    dnf config-manager --set-enabled crb >> "$log"
+  fi
+
+  setCurrentStep "Setting up Sangoma repository"
 }
 
-# 커널 호환성 체크 함수
+# Create post yum run script to run and check everything yum command is finished executing
+create_post_yum_script() {
+  # checking post-yum-run script
+  if [ -e "/usr/bin/post-yum-run" ]; then
+    rm -f /usr/bin/post-yum-run
+  fi
+
+  message "Creating script to run post every yum command is finished executing"
+  {
+    echo "#!/bin/bash"
+    echo ""
+    echo "if pidof -x 'asterisk-version-switch' > /dev/null; then"
+    echo "echo \"Asterisk version switch process is running, skipping post-yum script.\""
+    echo "exit 0"
+    echo "fi"
+    echo ""
+    echo "dahdi_pres=\$(rpm -qa | grep dahdi-linux | wc -l)"
+    echo ""
+    echo "if [[ \$dahdi_pres -gt 0 ]]; then"
+    echo "    kernel_idx=\$(grep -v '^#' /etc/default/grub | grep GRUB_DEFAULT | cut -d '=' -f2 | tr -d '\"')"
+    echo ""
+    echo "    # Check if it contains '>'"
+    echo "    if [[ \"\$kernel_idx\" == *\">\"* ]]; then"
+    echo "        # Extract the value after '>'"
+    echo "        selected_idx=\"\${kernel_idx#*>}\""
+    echo "        submenu_format=true"
+    echo "    else"
+    echo "        # It's a numeric index, use it directly"
+    echo "        selected_idx=\"\$kernel_idx\""
+    echo "        submenu_format=false"
+    echo "    fi"
+    echo ""
+    echo "    kernel_pres=\$(grep -oP \"menuentry '.*?Linux \K[0-9.-]+(?=-x86_64)\" /boot/grub2/grub.cfg)"
+    echo "    kernel_count=\$(echo \"\$kernel_pres\" | wc -l)"
+    echo ""
+    echo "    if [[ \"\$selected_idx\" -ge \"\$kernel_count\" ]]; then"
+    echo "        if \$submenu_format; then"
+    echo "            echo \"ERROR: GRUB_DEFAULT is set to '\$kernel_idx' (submenu index: \$selected_idx), but only \$kernel_count kernel entries are available.\""
+    echo "            echo \"       This likely refers to a non-existent kernel inside a submenu (e.g., 'Advanced options for Rocky Linux').\""
+    echo "            echo \"       Please update /etc/default/grub to a valid submenu index between 0 and \$((kernel_count - 1)), then run: grub2-mkconfig -o /boot/grub2/grub.cfg\""
+    echo "        else"
+    echo "            echo \"ERROR: GRUB_DEFAULT is set to '\$selected_idx', but only \$kernel_count kernel entries were found.\""
+    echo "            echo \"       Valid indices are between 0 and \$((kernel_count - 1)).\""
+    echo "            echo \"       Please update /etc/default/grub and run: grub2-mkconfig -o /boot/grub2/grub.cfg\""
+    echo "        fi"
+    echo "        exit 1"
+    echo "    fi"
+    echo ""
+    echo "    idx=0"
+    echo "    for kernel in \$kernel_pres; do"
+    echo "        if [[ \$idx -ne \$selected_idx ]]; then"
+    echo "            idx=\$((idx+1))"
+    echo "            continue"
+    echo "        fi"
+    echo ""
+    echo "        logger \"Checking kernel modules for dahdi and wanpipe for kernel image \$kernel\""
+    echo ""
+    echo "        #check if dahdi is installed or not of respective kernel version"
+    echo "        dahdi_kmod_pres=\$(rpm -qa | grep dahdi-linux-kmod | grep \$kernel | wc -l)"
+    echo "        wanpipe_kmod_pres=\$(rpm -qa | grep kmod-wanpipe | grep \$kernel | wc -l)"
+    echo ""
+    echo "        if [[ \$dahdi_kmod_pres -eq 0 ]] && [[ \$wanpipe_kmod_pres -eq 0 ]]; then"
+    echo "            logger \"Upgrading dahdi-linux-kmod-\$kernel and kmod-wanpipe-\$kernel\""
+    echo "            echo \"Please wait for approx 2 min once yum command execution is completed as dahdi-linux-kmod-\$kernel kmod-wanpipe-\$kernel update in progress\""
+    echo "            yum -y upgrade dahdi-linux-kmod-\$kernel kmod-wanpipe-\$kernel > /dev/null 2>&1 | at now +1 minute&"
+    echo "        elif [[ \$dahdi_kmod_pres -eq 0 ]]; then"
+    echo "            logger \"Upgrading dahdi-linux-kmod-\$kernel\""
+    echo "            echo \"Please wait for approx 2 min once yum command execution is completed as dahdi-linux-kmod-\$kernel update in progress\""
+    echo "            yum -y upgrade dahdi-linux-kmod-\$kernel > /dev/null 2>&1 | at now +1 minute&"
+    echo "        elif [[ \$wanpipe_kmod_pres -eq 0 ]];then"
+    echo "            logger \"Upgrading kmod-wanpipe-\$kernel\""
+    echo "            echo \"Please wait for approx 2 min once yum command execution is completed as kmod-wanpipe-\$kernel update in progress\""
+    echo "            yum -y upgrade kmod-wanpipe-\$kernel > /dev/null 2>&1 | at now +1 minute&"
+    echo "        fi"
+    echo ""
+    echo "        break"
+    echo "    done"
+    echo "else"
+    echo "    logger \"Dahdi / wanpipe is not present therefore, not checking for dahdi / wanpipe kmod upgrade\""
+    echo "fi"
+    echo ""
+    echo "if [ -e "/var/www/html/index.html" ]; then"
+    echo "    rm -f /var/www/html/index.html"
+    echo "fi"
+  } >> /usr/bin/post-yum-run
+
+  # Changing file permission to run script
+  chmod 755 /usr/bin/post-yum-run
+
+  # Adding Post Invoke for Update to run kernel-check
+  if [ -e "/etc/yum/pluginconf.d/post-yum-run.conf" ]; then
+    rm -f /etc/yum/pluginconf.d/post-yum-run.conf
+  fi
+
+  echo "[main]" >> /etc/yum/pluginconf.d/post-yum-run.conf
+  echo "enabled=1" >> /etc/yum/pluginconf.d/post-yum-run.conf
+  echo "post_command=/usr/bin/post-yum-run" >> /etc/yum/pluginconf.d/post-yum-run.conf
+  chmod 644 /etc/yum/pluginconf.d/post-yum-run.conf
+}
+
 check_kernel_compatibility() {
-    local curr_kernel_version=$1
-    # Rocky Linux 9.6의 기본 커널은 DAHDI와 호환됩니다
-    message "커널 버전 $curr_kernel_version 확인 완료"
+  local latest_dahdi_supported_version=$(yum search dahdi | grep -E "^dahdi-linux-kmod-[0-9]" | awk '{print $1}' | awk -F'-' '{print $4"-"$5}' | sort -n | tail -1)
+  local latest_wanpipe_supported_version=$(yum search wanpipe | grep -E "^kmod-wanpipe-[0-9]" | awk '{print $1}' | awk -F'-' '{print $3"-"$4}' | sort -n | tail -1)
+  local curr_kernel_version=$1
+
+  if rpm --compare-versions "$latest_dahdi_supported_version" "eq" "$latest_wanpipe_supported_version"; then
+    local supported_kernel_version=$latest_dahdi_supported_version
+  else
+    local supported_kernel_version="5.14.0-284"
+  fi
+
+  if rpm --compare-versions "$curr_kernel_version" "gt" "$supported_kernel_version"; then
+    message "Aborting freepbx installation as detected kernel version $curr_kernel_version is not supported by freepbx dahdi module $supported_kernel_version"
+    exit
+  fi
+
+  if [ -e "/usr/bin/kernel-check" ]; then
+    rm -f /usr/bin/kernel-check
+  fi
+
+  if [ "$testrepo" ]; then
+    message "Skipping Kernel Check. As Kernel Check is not required for testing repo....."
+    return
+  fi
+
+  message "Creating kernel check script to allow proper kernel upgrades"
+  {
+    echo "#!/bin/bash"
+    echo ""
+    echo "curr_kernel_version=\"\""
+    echo "supported_kernel_version=\"\""
+    echo ""
+
+    echo "set_supported_kernel_version() {"
+    echo "    local latest_dahdi_supported_version=\$(yum search dahdi | grep -E \"^dahdi-linux-kmod-[0-9]\" | awk '{print \$1}' | awk -F'-' '{print \$4,-\$5}' | sed 's/[[:space:]]//g' | sort -n | tail -1)"
+    echo "    local latest_wanpipe_supported_version=\$(yum search wanpipe | grep -E \"^kmod-wanpipe-[0-9]\" | awk '{print \$1}' | awk -F'-' '{print \$3,-\$4}' | sed 's/[[:space:]]//g' | sort -n | tail -1)"
+    echo "    curr_kernel_version=\$(uname -r | cut -d'-' -f1-2)"
+    echo ""
+    echo "    if rpm --compare-versions \"\$latest_dahdi_supported_version\" \"eq\" \"\$latest_wanpipe_supported_version\"; then"
+    echo "        supported_kernel_version=\$latest_dahdi_supported_version"
+    echo "    else"
+    echo "        supported_kernel_version=\"5.14.0-284\""
+    echo "    fi"
+    echo "}"
+    echo ""
+
+    echo "check_and_unblock_kernel() {"
+    echo "    local kernel_packages=\$(yum versionlock list | grep -E ^kernel-[0-9] | awk '{print \$1}')"
+    echo ""
+    echo "    if [[ \"w\$1\" != \"w\" ]]; then"
+    echo "        # Compare the version with the current supported kernel version"
+    echo "        if rpm --compare-versions \"\$1\" \"le\" \"\$supported_kernel_version\"; then"
+    echo "            local is_on_hold=\$(yum versionlock list | grep -E ^kernel-[0-9] | awk '{print \$1}' | grep -w \"\$1\" | wc -l )"
+    echo ""
+    echo "            if [[ \$is_on_hold -gt 0 ]]; then"
+    echo "                logger \"Un-Holding kernel version \$version to allow automatic updates.\""
+    echo "                yum versionlock delete \"\$version\" >> /dev/null 2>&1"
+    echo "            fi"
+    echo "        fi"
+    echo "        return"
+    echo "    fi"
+    echo ""
+    echo "    for package in \$kernel_packages; do"
+    echo "        # Extract the version from the package name"
+    echo "        local version=\$(echo \"\$package\" | awk -F'-' '{print \$2,-\$3}' | sed 's/[[:space:]]//g' | sort -n)"
+    echo ""
+
+    echo "        # Compare the version with the current supported kernel version"
+    echo "        if rpm --compare-versions \"\$version\" \"le\" \"\$supported_kernel_version\"; then"
+    echo "            logger \"Un-Holding kernel version \$version to allow automatic updates.\""
+    echo "            yum versionlock delete \"\$version\" >> /dev/null 2>&1"
+    echo "        fi"
+    echo "    done"
+    echo "}"
+
+    echo ""
+    echo "check_and_block_kernel() {"
+    echo "    if rpm --compare-versions \"\$curr_kernel_version\" \"gt\" \"\$supported_kernel_version\"; then"
+    echo "        logger \"Aborting as detected kernel version is not supported by freepbx dahdi module\""
+    echo "    fi"
+    echo ""
+
+    echo "    local kernel_packages=\$( yum search kernel | grep -E \"^kernel-[0-9]\" | awk '{print \$1}')"
+    echo "    for package in \$kernel_packages; do"
+    echo "        # Extract the version from the package name"
+    echo "        local version=\$(echo \"\$package\" | awk -F'-' '{print \$2,-\$3}' | sed 's/[[:space:]]//g' | sort -n)"
+    echo ""
+
+    echo "        # Compare the version with the current supported kernel version"
+    echo "        if rpm --compare-versions \"\$version\" \"gt\" \"\$supported_kernel_version\"; then"
+    echo "            logger \"Holding kernel version \$version to prevent automatic updates.\""
+    echo "            yum versionlock add \"\$version\" >> /dev/null 2>&1"
+    echo "        else"
+    echo "            check_and_unblock_kernel \$version"
+    echo "        fi"
+    echo "    done"
+    echo "}"
+
+    echo ""
+    echo "case \$1 in"
+    echo "    --hold)"
+    echo "        hold=true"
+    echo "        ;;"
+    echo ""
+    echo "    --unhold)"
+    echo "        unhold=true"
+    echo "        ;;"
+    echo ""
+    echo "    *)"
+    echo "        logger \"Unknown / Invalid option \$1\""
+    echo "        exit 1"
+    echo "        ;;"
+    echo "esac"
+    echo ""
+    echo "set_supported_kernel_version"
+    echo ""
+    echo "if [[ \$hold ]]; then"
+    echo "    check_and_block_kernel"
+    echo "elif [[ \$unhold ]]; then"
+    echo "    check_and_unblock_kernel"
+    echo "fi"
+  } >> /usr/bin/kernel-check
+
+  # Changing file permission to run script
+  chmod 755 /usr/bin/kernel-check
+
+  # Adding Post Invoke for Update to run kernel-check
+  if [ -e "/etc/yum/pluginconf.d/05checkkernel.conf" ]; then
+    rm -f /etc/yum/pluginconf.d/05checkkernel.conf
+  fi
+  echo "[main]" >> /etc/yum/pluginconf.d/05checkkernel.conf
+  echo "enabled=1" >> /etc/yum/pluginconf.d/05checkkernel.conf
+  echo "post_command=/usr/bin/kernel-check --hold" >> /etc/yum/pluginconf.d/05checkkernel.conf
+  chmod 644 /etc/yum/pluginconf.d/05checkkernel.conf
 }
 
-# 서명 새로고침 함수
 refresh_signatures() {
   fwconsole ma refreshsignatures >> "$log"
 }
 
-# 서비스 체크 함수
 check_services() {
-    services=("fail2ban" "firewalld")
-    for service in "${services[@]}"; do
-        service_status=$(systemctl is-active "$service")
-        if [[ "$service_status" != "active" ]]; then
-            message "서비스 $service가 활성화되지 않았습니다. 실행 중인지 확인하세요."
-        fi
-    done
-
-    httpd_status=$(systemctl is-active httpd)
-    if [[ "$httpd_status" == "active" ]]; then
-        httpd_process=$(netstat -anp | awk '$4 ~ /:80$/ {sub(/.*\//,"",$7); print $7}')
-        if [ "$httpd_process" == "httpd" ]; then
-            message "Apache(httpd) 서비스가 포트 80에서 실행 중입니다."
-        else
-            message "Apache(httpd)가 포트 80에서 실행되지 않습니다."
-        fi
-    else
-        message "Apache(httpd) 서비스가 활성화되지 않았습니다. 서비스를 활성화하세요"
+  services=("fail2ban" "iptables")
+  for service in "${services[@]}"; do
+    service_status=$(systemctl is-active "$service")
+    if [[ "$service_status" != "active" ]]; then
+      message "Service $service is not active. Please ensure it is running."
     fi
+  done
+
+  httpd_status=$(systemctl is-active httpd)
+  if [[ "$httpd_status" == "active" ]]; then
+    httpd_process=$(netstat -anp | awk '$4 ~ /:80$/ {sub(/.*\//,"",$7); print $7}')
+    if [ "$httpd_process" == "httpd" ]; then
+      message "Apache service is running on port 80."
+    else
+      message "Apache is not running in port 80."
+    fi
+  else
+    message "The Apache service is not active. Please activate the service"
+  fi
 }
 
-# PHP 버전 체크 함수
 check_php_version() {
-    php_version=$(php -v | grep built: | awk '{print $2}')
-    if [[ "${php_version:0:3}" == "8.2" ]]; then
-        message "설치된 PHP 버전 $php_version이 FreePBX와 호환됩니다."
-    else
-        message "설치된 PHP 버전 $php_version이 FreePBX와 호환되지 않습니다. PHP 버전 '8.2.x'를 설치하세요"
-    fi
+  php_version=$(php -v | grep built: | awk '{print $2}')
+  if [[ "${php_version:0:3}" == "8.2" ]]; then
+    message "Installed PHP version $php_version is compatible with FreePBX."
+  else
+    message "Installed PHP version  $php_version is not compatible with FreePBX. Please install PHP version '8.2.x'"
+  fi
+
+  # Checking whether enabled PHP modules are of PHP 8.2 version
+  php_module_version=$(php -m | grep -E "^php[0-9]+\$" | head -1)
+
+  if [[ "$php_module_version" == "php8.2" ]]; then
+    log "The PHP module version $php_module_version is compatible with FreePBX. Proceeding with the script."
+  else
+    log "The installed PHP module version $php_module_version is not compatible with FreePBX. Please install PHP version '8.2'."
+    exit 1
+  fi
 }
 
-# 모듈 상태 확인 함수
 verify_module_status() {
-    modules_list=$(fwconsole ma list | grep -Ewv "Enabled|----|Module|No repos")
-    if [ -z "$modules_list" ]; then
-        message "모든 모듈이 활성화되었습니다."
-    else
-        message "활성화되지 않은 모듈 목록:"
-        message "$modules_list"
-    fi
+  modules_list=$(fwconsole ma list | grep -Ewv "Enabled|----|Module|No repos")
+  if [ -z "$modules_list" ]; then
+    message "All Modules are Enabled."
+  else
+    message "List of modules which are not Enabled:"
+    message "$modules_list"
+  fi
 }
 
-# 네트워크 포트 검사 함수
+# Function to check assigned ports for services
 inspect_network_ports() {
-    local ports_services=(
-        82 restapps
-        83 restapi
-        81 ucp
-        80 acp
-        84 hpro
-        "" leport
-        "" sslrestapps
-        "" sslrestapi
-        "" sslucp
-        "" sslacp
-        "" sslhpro
-        "" sslsngphone
-    )
+  # Array of port and service pairs
+  local ports_services=(
+    82 restapps
+    83 restapi
+    81 ucp
+    80 acp
+    84 hpro
+    "" leport
+    "" sslrestapps
+    "" sslrestapi
+    "" sslucp
+    "" sslacp
+    "" sslhpro
+    "" sslsngphone
+  )
 
-    for (( i=0; i<${#ports_services[@]}; i+=2 )); do
-        port="${ports_services[i]}"
-        service="${ports_services[i+1]}"
-        port_set=$(fwconsole sa ports | grep "$service" | cut -d'|' -f 2 | tr -d '[:space:]')
+  for (( i=0; i<${#ports_services[@]}; i+=2 )); do
+    port="${ports_services[i]}"
+    service="${ports_services[i+1]}"
+    port_set=$(fwconsole sa ports | grep "$service" | cut -d'|' -f 2 | tr -d '[:space:]')
 
-        if [ "$port_set" == "$port" ]; then
-            message "$service 모듈이 기본 포트에 할당되었습니다."
-        else
-            message "$service 모듈이 포트 $port_set 대신 포트 $port에 할당되어야 합니다"
-        fi
-    done
+    if [ "$port_set" == "$port" ]; then
+      message "$service module is assigned to its default port."
+    else
+      message "$service module is expected to have port $port assigned instead of $port_set"
+    fi
+  done
 }
 
-# 실행 중인 프로세스 검사 함수
 inspect_running_processes() {
-    processes=$(fwconsole pm2 --list |  grep -Ewv "online|----|Process")
-    if [ -z "$processes" ]; then
-        message "오프라인 프로세스가 없습니다."
-    else
-        message "오프라인 프로세스 목록:"
-        message "$processes"
-    fi
+  processes=$(fwconsole pm2 --list |  grep -Ewv "online|----|Process")
+  if [ -z "$processes" ]; then
+    message "No Offline Processes found."
+  else
+    message "List of Offline processes:"
+    message "$processes"
+  fi
 }
 
-# FreePBX 체크 함수
 check_freepbx() {
-     if ! rpm -q freepbx >/dev/null 2>&1; then
-        message "FreePBX가 설치되지 않았습니다. 계속하려면 FreePBX를 설치하세요."
-    else
-        verify_module_status
-	if [ ! "$opensourceonly" ] ; then
-        	inspect_network_ports
-	fi
-        inspect_running_processes
-        inspect_job_status=$(fwconsole job --list)
-        message "작업 목록 : $inspect_job_status"
+  # Check if FreePBX is installed
+  if ! rpm -q freepbx17 &>/dev/null; then
+    message "FreePBX is not installed. Please install FreePBX to proceed."
+  else
+    verify_module_status
+    if [ ! "$opensourceonly" ] ; then
+      inspect_network_ports
     fi
+    inspect_running_processes
+    inspect_job_status=$(fwconsole job --list)
+    message "Job list : $inspect_job_status"
+  fi
 }
 
-# Digium 전화 버전 체크 함수
 check_digium_phones_version() {
-    installed_version=$(asterisk -rx 'digium_phones show version' | awk '/Version/{print $NF}' 2>/dev/null)
-    if [[ -n "$installed_version" ]]; then
-        required_version="21.0_3.6.8"
-        present_version=$(echo "$installed_version" | sed 's/_/./g')
-        required_version=$(echo "$required_version" | sed 's/_/./g')
-        if rpm --compare-versions "$present_version" "lt" "$required_version" >/dev/null 2>&1; then
-            message "Digium Phones 모듈의 더 새로운 버전을 사용할 수 있습니다."
-        else
-            message "설치된 Digium Phones 모듈 버전: ($installed_version)"
-        fi
+  installed_version=$(asterisk -rx 'digium_phones show version' | awk '/Version/{print $NF}' 2>/dev/null)
+  if [[ -n "$installed_version" ]]; then
+    required_version="21.0_3.6.8"
+    present_version=$(echo "$installed_version" | sed 's/_/./g')
+    required_version=$(echo "$required_version" | sed 's/_/./g')
+    if rpm --compare-versions "$present_version" "lt" "$required_version"; then
+      message "A newer version of Digium Phones module is available."
     else
-        message "Digium Phones 모듈 버전 확인에 실패했습니다."
+      message "Installed Digium Phones module version: ($installed_version)"
     fi
+  else
+    message "Failed to check Digium Phones module version."
+  fi
 }
 
-# Asterisk 체크 함수
 check_asterisk() {
-    if ! rpm -q asterisk >/dev/null 2>&1; then
-        message "Asterisk가 설치되지 않았습니다. 계속하려면 Asterisk를 설치하세요."
+  if ! rpm -q asterisk &>/dev/null; then
+    message "Asterisk is not installed. Please install Asterisk to proceed."
+  else
+    check_asterisk_version=$(asterisk -V)
+    message "$check_asterisk_version"
+    if asterisk -rx "module show" | grep -q "res_digium_phone.so"; then
+      check_digium_phones_version
     else
-        check_asterisk_version=$(asterisk -V)
-        message "$check_asterisk_version"
-	if asterisk -rx "module show" | grep -q "res_digium_phone.so"; then
-            check_digium_phones_version
-        else
-            message "Digium Phones 모듈이 로드되지 않았습니다. 올바르게 설치되고 로드되었는지 확인하세요."
-        fi
+      message "Digium Phones module is not loaded. Please make sure it is installed and loaded correctly."
     fi
+  fi
 }
 
-# 패키지 홀드 함수
 hold_packages() {
-    local packages=("sangoma-pbx17" "nodejs" "node-*")
-    if [ ! "$nofpbx" ] ; then
-        packages+=("freepbx17")
-    fi
+  # List of package names to hold
+  local packages=("sangoma-pbx17" "nodejs" "node-*")
+  if [ ! "$nofpbx" ] ; then
+    packages+=("freepbx17")
+  fi
 
-    for pkg in "${packages[@]}"; do
-        dnf mark install "$pkg" >> "$log" 2>/dev/null || true
-    done
+  # Loop through each package and hold it
+  for pkg in "${packages[@]}"; do
+    yum versionlock add "$pkg" >> "$log"
+  done
 }
 
 ################################################################################################################
@@ -380,303 +648,359 @@ kernel=$(uname -a)
 host=$(hostname)
 fqdn="$(hostname -f)" || true
 
-# wget 설치
-pkg_install wget
+# Install wget which is required for version check
+yum_install wget
 
-# 스크립트 중복 실행 방지
+# Script version check
+if [[ $skipversion ]]; then
+  message "Skipping version check..."
+else
+  # Perform version check if --skipversion is not provided
+  message "Performing version check..."
+  check_version
+fi
+
+# Check if running in a Container
+if systemd-detect-virt --container &> /dev/null; then
+  message "Running in a Container. Skipping Chrony installation."
+  nochrony=true
+fi
+
+# Check if we are running on a 64-bit system
+ARCH=$(uname -m)
+if [ "$ARCH" != "x86_64" ]; then
+  message "FreePBX 17 installation can only be made on a 64-bit (x86_64) system!"
+  message "Current System's Architecture: $ARCH"
+  exit 1
+fi
+
+# Check if hostname command succeeded and FQDN is not empty
+if [ -z "$fqdn" ]; then
+  echo "Fully qualified domain name (FQDN) is not set correctly."
+  echo "Please set the FQDN for this system and re-run the script."
+  echo "To set the FQDN, update the /etc/hostname and /etc/hosts files."
+  exit 1
+fi
+
+# Ensure the script is not running
 pidfile='/var/run/freepbx17_installer.pid'
 
 if [ -f "$pidfile" ]; then
-	old_pid=$(cat "$pidfile")
-	if ps -p "$old_pid" > /dev/null; then
-		message "FreePBX 17 설치 프로세스가 이미 진행 중입니다 (PID=$old_pid), 새 프로세스를 시작하지 않습니다"
-		exit 1
-	else
-		log "오래된 PID 파일 제거"
-		rm -f "${pidfile}"
-	fi
+  old_pid=$(cat "$pidfile")
+  if ps -p "$old_pid" > /dev/null; then
+    message "FreePBX 17 installation process is already going on (PID=$old_pid), hence not starting new process"
+    exit 1
+  else
+    log "Removing stale PID file"
+    rm -f "${pidfile}"
+  fi
 fi
 echo "$$" > "$pidfile"
 
-setCurrentStep "설치 시작."
+setCurrentStep "Starting installation."
 trap 'errorHandler "$LINENO" "$?" "$BASH_COMMAND"' ERR
 trap "terminate" EXIT
 
 start=$(date +%s)
-message "  $host $kernel에 대한 FreePBX 17 설치 프로세스 시작"
-message "  프로세스에 대한 자세한 내용은 $log를 참조하세요..."
-log "  스크립트 v$SCRIPTVER 실행 중..."
+message "  Starting FreePBX 17 installation process for $host $kernel"
+message "  Please refer to the $log to know the process..."
+log "  Executing script v$SCRIPTVER ..."
 
-setCurrentStep "설치 환경 정리"
-# 깨진 설치 수정
-dnf check-update >> "$log" 2>&1 || true
+setCurrentStep "Making sure installation is sane"
+# Fixing broken install
+dnf clean all >> "$log"
 dnf autoremove -y >> "$log"
 
-dnf update -y >> "$log"
+setCurrentStep "Setting up default configuration"
+# Configure postfix for non-interactive installation
+postconf -e "myhostname = ${fqdn}"
+postconf -e "mydomain = $(echo ${fqdn} | cut -d. -f2-)"
+postconf -e "myorigin = \$mydomain"
 
-# 기본 설정
-setCurrentStep "기본 설정 구성"
-# postfix 설정
-echo "postfix postfix/mailname string ${fqdn}" | debconf-set-selections 2>/dev/null || true
+# Install below packages which are required for repositories setup
+yum_install dnf-utils
+yum_install gnupg2
 
-# 저장소 설정에 필요한 패키지 설치
-pkg_install dnf-utils
-pkg_install gnupg2
-
-setCurrentStep "저장소 설정"
+setCurrentStep "Setting up repositories"
 setup_repositories
 
+lat_dahdi_supp_ver=$(yum search dahdi | grep -E "^dahdi-linux-kmod-[0-9]" | awk '{print $1}' | awk -F'-' '{print $4"-"$5}' | sort -n | tail -1)
 kernel_version=$(uname -r | cut -d'-' -f1-2)
 
-message "커널 $kernel_version에서 FreePBX 17을 설치하고 있습니다."
-message "DAHDI를 사용할 계획이 있다면:"
-message "DAHDI 옵션을 선택하여 스크립트가 DAHDI를 구성하도록 하거나"
-message "DAHDI 지원 커널을 실행하고 있는지 확인하세요."
+message " You are installing FreePBX 17 on kernel $kernel_version."
+message " Please note that if you have plan to use DAHDI then:"
+message " Ensure that you either choose DAHDI option so script will configure DAHDI"
+message "                                  OR"
+message " Ensure you are running a DAHDI supported Kernel. Current latest supported kernel version is $lat_dahdi_supp_ver."
 
 if [ "$dahdi" ]; then
-    setCurrentStep "적절한 커널 업그레이드 및 버전 설치 허용"
-    check_kernel_compatibility "$kernel_version"
+  setCurrentStep "Making sure we allow only proper kernel upgrade and version installation"
+  check_kernel_compatibility "$kernel_version"
 fi
 
-setCurrentStep "저장소 업데이트"
+setCurrentStep "Updating repository"
 dnf update -y >> "$log"
 
-# 저장소 정책 로그
-dnf repolist >> "$log"
-
-# 서비스 자동 시작 방지
-systemctl mask tftp >> "$log" 2>&1 || true
+# Don't start the tftp & chrony daemons automatically, as we need to change their configuration
+systemctl mask tftp.service
 if [ "$nochrony" != true ]; then
-	systemctl mask chronyd >> "$log" 2>&1 || true
+  systemctl mask chronyd.service
 fi
 
-# 의존 패키지 설치
-setCurrentStep "필수 패키지 설치"
+# Install dependent packages
+setCurrentStep "Installing required packages"
 DEPPRODPKGS=(
-	"redis"
-	"ghostscript"
-	"libtiff-tools"
-	"iptables-services"
-	"net-tools"
-	"rsyslog"
-	"avahi"
-	"nmap"
-	"httpd"
-	"zip"
-	"incron"
-	"wget"
-	"vim"
-	"openssh-server"
-	"rsync"
-	"mariadb-server"
-	"mariadb"
-	"bison"
-	"flex"
-	"flite"
-	"php${PHPVERSION}"
-	"php${PHPVERSION}-curl"
-	"php${PHPVERSION}-zip"
-	"php${PHPVERSION}-redis"
-	"php${PHPVERSION}-curl"
-	"php${PHPVERSION}-cli"
-	"php${PHPVERSION}-common"
-	"php${PHPVERSION}-mysqlnd"
-	"php${PHPVERSION}-gd"
-	"php${PHPVERSION}-mbstring"
-	"php${PHPVERSION}-intl"
-	"php${PHPVERSION}-xml"
-	"php${PHPVERSION}-bz2"
-	"php${PHPVERSION}-ldap"
-	"php${PHPVERSION}-sqlite3"
-	"php${PHPVERSION}-bcmath"
-	"php${PHPVERSION}-soap"
-	"php${PHPVERSION}-ssh2"
-	"php-pear"
-	"curl"
-	"sox"
-	"mpg123"
-	"sqlite"
-	"git"
-	"uuid"
-	"unixODBC"
-	"sudo"
-	"subversion"
-	"nodejs"
-	"npm"
-	"ipset"
-	"iptables"
-	"fail2ban"
-	"htop"
-	"postfix"
-	"tcpdump"
-	"sngrep"
-	"tftp-server"
-	"xinetd"
-	"lame"
-	"screen"
-	"sysstat"
-	"ca-certificates"
- 	"cronie"
- 	"python3-PyMySQL"
- 	"at"
- 	"avahi-tools"
-	"nss-mdns"
-	"mailx"
-	"liburiparser"
-	"ffmpeg"
-	"python3-mysqldb"
-	"python3"
-	"pkgconf"
-	"libicu-devel"
-	"libsrtp2"
-	"libspandsp"
-	"ncurses"
-	"autoconf"
-	"libical"
-	"libneon"
-	"net-snmp"
-	"libtonezone"
-	"bluez-libs"
-	"unbound-libs"
-	"freetds"
-	"speexdsp"
-	"iksemel"
-	"libresample"
-	"gmime30"
-	"cyrus-sasl"
-	"ImageMagick"
+  "redis"
+  "ghostscript"
+  "libtiff-tools"
+  "iptables-services"
+  "net-tools"
+  "rsyslog"
+  "avahi"
+  "nmap"
+  "httpd"
+  "zip"
+  "incron"
+  "wget"
+  "vim"
+  "openssh-server"
+  "rsync"
+  "mariadb-server"
+  "mariadb"
+  "bison"
+  "flex"
+  "flite"
+  "php${PHPVERSION}"
+  "php${PHPVERSION}-curl"
+  "php${PHPVERSION}-zip"
+  "php${PHPVERSION}-redis"
+  "php${PHPVERSION}-cli"
+  "php${PHPVERSION}-common"
+  "php${PHPVERSION}-mysql"
+  "php${PHPVERSION}-gd"
+  "php${PHPVERSION}-mbstring"
+  "php${PHPVERSION}-intl"
+  "php${PHPVERSION}-xml"
+  "php${PHPVERSION}-bz2"
+  "php${PHPVERSION}-ldap"
+  "php${PHPVERSION}-sqlite3"
+  "php${PHPVERSION}-bcmath"
+  "php${PHPVERSION}-soap"
+  "php${PHPVERSION}-ssh2"
+  "php-pear"
+  "curl"
+  "sox"
+  "mpg123"
+  "sqlite"
+  "git"
+  "uuid"
+  "mariadb-connector-odbc"
+  "sudo"
+  "subversion"
+  "unixODBC"
+  "nodejs"
+  "npm"
+  "ipset"
+  "iptables"
+  "fail2ban"
+  "htop"
+  "postfix"
+  "tcpdump"
+  "sngrep"
+  "tftp-server"
+  "xinetd"
+  "lame"
+  "haproxy"
+  "screen"
+  "easy-rsa"
+  "openvpn"
+  "sysstat"
+  "ca-certificates"
+  "cronie"
+  "python3-mysql"
+  "at"
+  "avahi"
+  "nss-mdns"
+  "mailx"
+  # Asterisk package
+  "liburiparser"
+  # ffmpeg package
+  "ffmpeg"
+  # System Admin module
+  "python3-mysql"
+  "python3"
+  # User Control Panel module
+  "pkgconf"
+  "libicu"
+  "libsrtp"
+  "libspandsp"
+  "ncurses"
+  "autoconf"
+  "libical"
+  "neon"
+  "net-snmp"
+  "libtonezone"
+  "bluez-libs"
+  "unbound-libs"
+  "freetds"
+  "speexdsp"
+  "iksemel"
+  "libresample"
+  "gmime30"
+  "uw-imap"
+  "ImageMagick"
 )
 DEPDEVPKGS=(
-	"net-snmp-devel"
-	"libtonezone-devel"
-	"postgresql-devel"
-	"lua-devel"
-	"libpri-devel"
-	"bluez-libs-devel"
-	"unbound-devel"
-	"speexdsp-devel"
-	"iksemel-devel"
-	"libresample-devel"
-	"gmime30-devel"
-	"cyrus-sasl-devel"
-	"ncurses-devel"
-	"openssl-devel"
-	"libxml2-devel"
-	"newt-devel"
-	"sqlite-devel"
-	"unixODBC-devel"
-	"uuid-devel"
-	"alsa-lib-devel"
-	"libogg-devel"
-	"libvorbis-devel"
-	"libcurl-devel"
-	"libical-devel"
-	"libneon-devel"
-	"libsrtp2-devel"
-	"libspandsp-devel"
-	"jansson-devel"
-	"liburiparser-devel"
-	"python3-devel"
-	"mariadb-devel"
-	"gcc"
-	"gcc-c++"
-	"make"
-	"automake"
-	"autoconf"
-	"libtool"
-	"bison"
-	"flex"
+  "net-snmp-devel"
+  "libtonezone-devel"
+  "postgresql-devel"
+  "lua-devel"
+  "libpri-devel"
+  "bluez-libs-devel"
+  "unbound-devel"
+  "speexdsp-devel"
+  "iksemel-devel"
+  "libresample-devel"
+  "gmime30-devel"
+  "uw-imap-devel"
+  "ncurses-devel"
+  "openssl-devel"
+  "libxml2-devel"
+  "newt-devel"
+  "sqlite-devel"
+  "unixODBC-devel"
+  "libuuid-devel"
+  "alsa-lib-devel"
+  "libogg-devel"
+  "libvorbis-devel"
+  "libcurl-devel"
+  "libical-devel"
+  "neon-devel"
+  "libsrtp-devel"
+  "libspandsp-devel"
+  "jansson-devel"
+  "liburiparser-devel"
+  "ffmpeg-devel"
+  "python3-devel"
+  "mariadb-devel"
+  "rpm-build"
+  "gcc"
+  "gcc-c++"
+  "make"
+  "automake"
+  "autoconf"
+  "libtool"
+  "bison"
+  "flex"
 )
 if [ $dev ]; then
-	DEPPKGS=("${DEPPRODPKGS[@]}" "${DEPDEVPKGS[@]}")
+  DEPPKGS=("${DEPPRODPKGS[@]}" "${DEPDEVPKGS[@]}")
 else
-	DEPPKGS=("${DEPPRODPKGS[@]}")
+  DEPPKGS=("${DEPPRODPKGS[@]}")
 fi
 if [ "$nochrony" != true ]; then
-	DEPPKGS+=("chrony")
+  DEPPKGS+=("chrony")
 fi
 for i in "${!DEPPKGS[@]}"; do
-	pkg_install "${DEPPKGS[$i]}"
+  yum_install "${DEPPKGS[$i]}"
 done
 
-# postfix 설정
-if rpm -q postfix >/dev/null 2>&1; then
-    warning_message="# WARNING: inet_interfaces를 127.0.0.1이 아닌 IP로 변경하면 Postfix가 외부 네트워크 연결에 노출될 수 있습니다.\n# 특정 네트워크 요구사항이 있고 그 의미를 이해하는 경우에만 이 설정을 수정하세요."
+if rpm -q postfix &>/dev/null; then
+  warning_message="# WARNING: Changing the inet_interfaces to an IP other than 127.0.0.1 may expose Postfix to external network connections.\n# Only modify this setting if you understand the implications and have specific network requirements."
 
-    if ! grep -q "WARNING: inet_interfaces" /etc/postfix/main.cf; then
-        sed -i "/^inet_interfaces\s*=/i $warning_message" /etc/postfix/main.cf
-    fi
+  if ! grep -q "WARNING: Changing the inet_interfaces" /etc/postfix/main.cf; then
+    # Add the warning message above the inet_interfaces configuration
+    sed -i "/^inet_interfaces\s*=/i $warning_message" /etc/postfix/main.cf
+  fi
 
-    sed -i "s/^inet_interfaces\s*=.*/inet_interfaces = 127.0.0.1/" /etc/postfix/main.cf
+  sed -i "s/^inet_interfaces\s*=.*/inet_interfaces = 127.0.0.1/" /etc/postfix/main.cf
 
-    systemctl restart postfix
+  systemctl restart postfix
 fi
 
-# DAHDI 카드 지원 설치 (--dahdi 옵션이 제공된 경우)
+# OpenVPN EasyRSA configuration
+if [ ! -d "/etc/openvpn/easyrsa3" ]; then
+  make-cadir /etc/openvpn/easyrsa3
+fi
+# Remove below files which will be generated by sysadmin later
+rm -f /etc/openvpn/easyrsa3/pki/vars || true
+rm -f /etc/openvpn/easyrsa3/vars
+
+# Install Dahdi card support if --dahdi option is provided
 if [ "$dahdi" ]; then
-    message "DAHDI 카드 지원 설치 중..."
-    DAHDIPKGS=("asterisk${ASTVERSION}-dahdi"
-           "dahdi-firmware"
-           "dahdi-linux"
-           "dahdi-linux-devel"
-           "dahdi-tools"
-           "libpri"
-           "libpri-devel"
-           "wanpipe"
-           "wanpipe-devel"
-	)
+  message "Installing DAHDI card support..."
+  DAHDIPKGS=("asterisk${ASTVERSION}-dahdi"
+    "dahdi-firmware"
+    "dahdi-linux"
+    "dahdi-linux-devel"
+    "dahdi-tools"
+    "libpri"
+    "libpri-devel"
+    "wanpipe"
+    "wanpipe-devel"
+    "dahdi-linux-kmod-${kernel_version}"
+    "kmod-wanpipe-${kernel_version}"
+  )
 
-        for i in "${!DAHDIPKGS[@]}"; do
-                pkg_install "${DAHDIPKGS[$i]}"
-        done
+  for i in "${!DAHDIPKGS[@]}"; do
+    yum_install "${DAHDIPKGS[$i]}"
+  done
 fi
 
-# libfdk-aac2 설치
+# Install libfdk-aac2
 if [ "$noaac" ] ; then
-	message "noaac 옵션으로 인해 libfdk-aac2 설치를 건너뜁니다"
+  message "Skipping libfdk-aac2 installation due to noaac option"
 else
-	pkg_install libfdk-aac2
+  yum_install libfdk-aac
 fi
 
-setCurrentStep "불필요한 패키지 제거"
+setCurrentStep "Removing unnecessary packages"
 dnf autoremove -y >> "$log"
 
 execution_time="$(($(date +%s) - start))"
-message "모든 의존 패키지 설치 실행 시간 : $execution_time s"
+message "Execution time to install all the dependent packages : $execution_time s"
 
-setCurrentStep "폴더 및 asterisk 설정"
+setCurrentStep "Setting up folders and asterisk config"
 groupExists="$(getent group asterisk || echo '')"
 if [ "${groupExists}" = "" ]; then
-	groupadd -r asterisk
+  groupadd -r asterisk
 fi
 
 userExists="$(getent passwd asterisk || echo '')"
 if [ "${userExists}" = "" ]; then
-	useradd -r -g asterisk -d /var/lib/asterisk -M -s /sbin/nologin asterisk
+  useradd -r -g asterisk -d /home/asterisk -M -s /bin/bash asterisk
 fi
 
-# /tftpboot 디렉토리 생성
+# Creating /tftpboot directory
 mkdir -p /tftpboot
 chown -R asterisk:asterisk /tftpboot
-
-# tftp 서비스 시작
-systemctl unmask tftp >> "$log" 2>&1 || true
-systemctl start tftp >> "$log" 2>&1 || true
+# Changing the tftp process path to tftpboot
+sed -i -e "s|^TFTP_DIRECTORY=\"/var/lib/tftpboot\"$|TFTP_DIRECTORY=\"/tftpboot\"|" /etc/xinetd.d/tftp
+# Change the tftp & chrony options when IPv6 is not available, to allow successful execution
+if [ ! -f /proc/net/if_inet6 ]; then
+  sed -i -e "s|^server_args.*$|server_args = -s /tftpboot -4|" /etc/xinetd.d/tftp
+  if [ "$nochrony" != true ]; then
+    sed -i -e "s|^OPTIONS=.*$|OPTIONS=\"-4\"|" /etc/sysconfig/chronyd
+  fi
+fi
+# Start the tftp & chrony daemons
+systemctl unmask tftp.service
+systemctl start tftp.service
 if [ "$nochrony" != true ]; then
-	systemctl unmask chronyd >> "$log" 2>&1 || true
-	systemctl start chronyd >> "$log" 2>&1 || true
+  systemctl unmask chronyd.service
+  systemctl start chronyd.service
 fi
 
-# asterisk 사운드 디렉토리 생성
+# Creating asterisk sound directory
 mkdir -p /var/lib/asterisk/sounds
 chown -R asterisk:asterisk /var/lib/asterisk
 
-# OpenSSL 설정 변경 (katana와 호환되도록)
+# Changing openssl to make it compatible with the katana
 sed -i -e 's/^openssl_conf = openssl_init$/openssl_conf = default_conf/' /etc/ssl/openssl.cnf
 
 isSSLConfigAdapted=$(grep "FreePBX 17 changes" /etc/ssl/openssl.cnf |wc -l)
 if [ "0" = "${isSSLConfigAdapted}" ]; then
-	cat <<EOF >> /etc/ssl/openssl.cnf
+  cat <<EOF >> /etc/ssl/openssl.cnf
 # FreePBX 17 changes - begin
 [ default_conf ]
 ssl_conf = ssl_sect
@@ -689,13 +1013,13 @@ CipherString = DEFAULT:@SECLEVEL=1
 EOF
 fi
 
-# IPv4 우선순위 설정
+# Setting higher precedence value to IPv4
 sed -i 's/^#\s*precedence ::ffff:0:0\/96  100/precedence ::ffff:0:0\/96  100/' /etc/gai.conf
 
-# screen 설정
+# Setting screen configuration
 isScreenRcAdapted=$(grep "FreePBX 17 changes" /root/.screenrc |wc -l)
 if [ "0" = "${isScreenRcAdapted}" ]; then
-	cat <<EOF >> /root/.screenrc
+  cat <<EOF >> /root/.screenrc
 # FreePBX 17 changes - begin
 hardstatus alwayslastline
 hardstatus string '%{= kG}[ %{G}%H %{g}][%= %{=kw}%?%-Lw%?%{r}(%{W}%n*%f%t%?(%u)%?%{r})%{w}%?%+Lw%?%?%= %{g}][%{B}%Y-%m-%d %{W}%c %{g}]'
@@ -703,24 +1027,27 @@ hardstatus string '%{= kG}[ %{G}%H %{g}][%= %{=kw}%?%-Lw%?%{r}(%{W}%n*%f%t%?(%u)
 EOF
 fi
 
-# VIM 설정 (마우스 복사 붙여넣기용)
+# Setting VIM configuration for mouse copy paste
 isVimRcAdapted=$(grep "FreePBX 17 changes" /etc/vimrc |wc -l)
 if [ "0" = "${isVimRcAdapted}" ]; then
-	cat <<EOF >> /etc/vimrc
+  cat <<EOF >> /etc/vimrc
 " FreePBX 17 changes - begin
-" 이 파일은 시작 시 기본 vim 옵션을 로드하고 나중에 다시 로드되지 않도록 방지합니다.
-" 이 파일 끝에 원하는 만큼의 옵션을 추가하거나 기본 설정을 덮어쓸 수 있습니다.
+" This file loads the default vim options at the beginning and prevents
+" that they are being loaded again later. All other options that will be set,
+" are added, or overwrite the default settings. Add as many options as you
+" whish at the end of this file.
 
-" 기본값 로드
+" Load the defaults
 source \$VIMRUNTIME/defaults.vim
 
-" 사용자가 로컬 vimrc(~/.vimrc)가 없는 경우 나중에 기본값이 다시 로드되지 않도록 방지
+" Prevent the defaults from being loaded again later, if the user doesn't
+" have a local vimrc (~/.vimrc)
 let skip_defaults_vim = 1
 
-" 더 많은 옵션 설정 (/usr/share/vim/vim80/defaults.vim의 설정 덮어쓰기)
-" 원하는 만큼의 옵션을 추가하세요
+" Set more options (overwrites settings from /usr/share/vim/vim80/defaults.vim)
+" Add as many options as you whish
 
-" 마우스 모드를 'r'로 설정
+" Set the mouse mode to 'r'
 if has('mouse')
   set mouse=r
 endif
@@ -728,39 +1055,43 @@ endif
 EOF
 fi
 
-# DNF 설정 (기존 구성 덮어쓰지 않음)
-dnfNoOverwrite=$(grep "conf_def" /etc/dnf/dnf.conf |wc -l)
-if [ "0" = "${dnfNoOverwrite}" ]; then
-        cat <<EOF >> /etc/dnf/dnf.conf
-conf_def=1
-conf_confold=1
-EOF
+# Setting yum configuration to always DO NOT overwrite existing configurations
+yumNoOverwrite=$(grep "assumeyes=1" /etc/yum.conf |wc -l)
+if [ "0" = "${yumNoOverwrite}" ]; then
+  echo "assumeyes=1" >> /etc/yum.conf
 fi
 
-# Asterisk 설치
+# Install Asterisk
 if [ "$noast" ] ; then
-	message "noasterisk 옵션으로 인해 Asterisk 설치를 건너뜁니다"
+  message "Skipping Asterisk installation due to noasterisk option"
 else
-	setCurrentStep "Asterisk 패키지 설치 중."
-	install_asterisk $ASTVERSION
+  # TODO Need to check if asterisk installed already then remove that and install new ones.
+  # Install Asterisk
+  setCurrentStep "Installing Asterisk packages."
+  install_asterisk $ASTVERSION
 fi
 
-# PBX 의존 패키지 설치
-setCurrentStep "FreePBX 패키지 설치"
+# Install PBX dependent packages
+setCurrentStep "Installing FreePBX packages"
 
 FPBXPKGS=("sysadmin17"
-	   "sangoma-pbx17"
-	   "ffmpeg"
-   )
+  "sangoma-pbx17"
+  "ffmpeg"
+)
 for i in "${!FPBXPKGS[@]}"; do
-	pkg_install "${FPBXPKGS[$i]}"
+  yum_install "${FPBXPKGS[$i]}"
 done
 
-# freepbx.ini 파일 활성화
-setCurrentStep "모듈 활성화."
+# Enabling freepbx.ini file
+setCurrentStep "Enabling modules."
+# Create PHP configuration for FreePBX
+mkdir -p /etc/php.d
+cat <<EOF > /etc/php.d/99-freepbx.ini
+extension=freepbx.so
+EOF
 mkdir -p /var/lib/php/session
 
-# 기본 설정 파일 생성
+# Creating default config files
 mkdir -p /etc/asterisk
 touch /etc/asterisk/extconfig_custom.conf
 touch /etc/asterisk/extensions_override_freepbx.conf
@@ -768,26 +1099,26 @@ touch /etc/asterisk/extensions_additional.conf
 touch /etc/asterisk/extensions_custom.conf
 chown -R asterisk:asterisk /etc/asterisk
 
-setCurrentStep "fail2ban 재시작"
-systemctl restart fail2ban  >> "$log"
+setCurrentStep "Restarting fail2ban"
+systemctl restart fail2ban >> "$log"
 
 if [ "$nofpbx" ] ; then
-  message "nofreepbx 옵션으로 인해 FreePBX 17 설치를 건너뜁니다"
+  message "Skipping FreePBX 17 installation due to nofreepbx option"
 else
-  setCurrentStep "FreePBX 17 설치"
-  pkg_install ioncube-loader-82
-  pkg_install freepbx17
+  setCurrentStep "Installing FreePBX 17"
+  yum_install ioncube-loader-82
+  yum_install freepbx17
 
   if [ -n "$NPM_MIRROR" ] ; then
-    setCurrentStep "환경 변수 npm_config_registry=$NPM_MIRROR 설정"
+    setCurrentStep "Setting environment variable npm_config_registry=$NPM_MIRROR"
     export npm_config_registry="$NPM_MIRROR"
   fi
 
-  # 오픈소스만 필요한 경우 상용 모듈 제거
+  # Check if only opensource required then remove the commercial modules
   if [ "$opensourceonly" ]; then
-    setCurrentStep "상용 모듈 제거"
+    setCurrentStep "Removing commercial modules"
     fwconsole ma list | awk '/Commercial/ {print $2}' | xargs -I {} fwconsole ma -f remove {} >> "$log"
-    # 방화벽 모듈도 제거 (상용 sysadmin 모듈에 의존)
+    # Remove firewall module also because it depends on commercial sysadmin module
     fwconsole ma -f remove firewall >> "$log" || true
   fi
 
@@ -796,53 +1127,61 @@ else
     echo 'export PERL5LIB=$PERL5LIB:/etc/wanpipe/wancfg_zaptel' | sudo tee -a /root/.bashrc
   fi
 
-  setCurrentStep "모든 로컬 모듈 설치"
+  setCurrentStep "Installing all local modules"
   fwconsole ma installlocal >> "$log"
 
-  setCurrentStep "FreePBX 17 모듈 업그레이드"
+  setCurrentStep "Upgrading FreePBX 17 modules"
   fwconsole ma upgradeall >> "$log"
 
-  setCurrentStep "FreePBX 17 리로드 및 재시작"
+  setCurrentStep "Reloading and restarting FreePBX 17"
   fwconsole reload >> "$log"
   fwconsole restart >> "$log"
 
   if [ "$opensourceonly" ]; then
-    # sysadmin 상용 모듈용 sysadmin 헬퍼 패키지 제거
-    message "sysadmin17 제거"
+    # Uninstall the sysadmin helper package for the sysadmin commercial module
+    message "Uninstalling sysadmin17"
     dnf remove -y sysadmin17 >> "$log"
-    # 상용 모듈용 ionCube 로더 제거
-    message "ioncube-loader-82 제거"
+    # Uninstall ionCube loader required for commercial modules and to install the freepbx17 package
+    message "Uninstalling ioncube-loader-82"
     dnf remove -y ioncube-loader-82 >> "$log"
   fi
 fi
 
-setCurrentStep "설치 프로세스 마무리"
+setCurrentStep "Wrapping up the installation process"
 systemctl daemon-reload >> "$log"
 if [ ! "$nofpbx" ] ; then
   systemctl enable freepbx >> "$log"
 fi
 
-# apache2 index.html 삭제 (필요하지 않음)
+# delete apache index.html as we do not need that file
 rm -f /var/www/html/index.html
 
-# apache mod ssl 활성화
-dnf install -y mod_ssl >> "$log"
+# enable apache mod ssl
+yum_install mod_ssl
 
-# apache mod expires 활성화
-dnf install -y mod_expires >> "$log"
+# enable apache mod expires
+yum_install mod_expires
 
-# apache rewrite 활성화
-dnf install -y mod_rewrite >> "$log"
-
-# FreePBX apache 설정 활성화
+# Enabling freepbx apache configuration
 if [ ! "$nofpbx" ] ; then 
-  # FreePBX용 Apache 설정 파일 생성
+  # Create Apache configuration for FreePBX
   cat <<EOF > /etc/httpd/conf.d/freepbx.conf
 <VirtualHost *:80>
+    ServerName ${fqdn}
     DocumentRoot /var/www/html
-    ServerName $fqdn
     <Directory /var/www/html>
-        Options Indexes FollowSymLinks
+        AllowOverride All
+        Require all granted
+    </Directory>
+</VirtualHost>
+
+<VirtualHost *:443>
+    ServerName ${fqdn}
+    DocumentRoot /var/www/html
+    SSLEngine on
+    SSLCertificateFile /etc/pki/tls/certs/localhost.crt
+    SSLCertificateKeyFile /etc/pki/tls/private/localhost.key
+    <Directory /var/www/html>
         AllowOverride All
         Require all granted
     </Directory>
@@ -850,40 +1189,42 @@ if [ ! "$nofpbx" ] ; then
 EOF
 fi
 
-# postfix 크기를 100MB로 설정
+# Setting postfix size to 100MB
 postconf -e message_size_limit=102400000
 
-# 공격자에게 제공되는 정보를 줄이기 위해 expose_php 비활성화
+# Disable expose_php for provide less information to attacker
 sed -i 's/\(^expose_php = \).*/\1Off/' /etc/php.ini
 
-# max_input_vars를 2000으로 설정
+# Setting max_input_vars to 2000
 sed -i 's/;max_input_vars = 1000/max_input_vars = 2000/' /etc/php.ini
 
-# 공격자에게 제공되는 정보를 줄이기 위해 ServerTokens와 ServerSignature 비활성화
+# Disable ServerTokens and ServerSignature for provide less information to attacker
 sed -i 's/\(^ServerTokens \).*/\1Prod/' /etc/httpd/conf/httpd.conf
 sed -i 's/\(^ServerSignature \).*/\1Off/' /etc/httpd/conf/httpd.conf
 
-# pcre.jit를 0으로 설정
+# Setting pcre.jit to 0
 sed -i 's/;pcre.jit=1/pcre.jit=0/' /etc/php.ini
 
-# httpd 재시작
+# Restart apache
 systemctl restart httpd >> "$log"
 
-setCurrentStep "패키지 홀드"
-
+setCurrentStep "Holding Packages"
 hold_packages
 
-# logrotate 설정 업데이트
+# Update logrotate configuration
 if grep -q '^#dateext' /etc/logrotate.conf; then
-   message "logrotate.conf 설정"
-   sed -i 's/^#dateext/dateext/' /etc/logrotate.conf
+  message "Setting up logrotate.conf"
+  sed -i 's/^#dateext/dateext/' /etc/logrotate.conf
 fi
 
-# 권한 설정
+# setting permissions
 chown -R asterisk:asterisk /var/www/html/
 
-# 서명 새로고침
-setCurrentStep "모듈 서명 새로고침."
+# Creating post yum scripts
+create_post_yum_script
+
+# Refresh signatures
+setCurrentStep "Refreshing modules signatures."
 count=1
 if [ ! "$nofpbx" ]; then
   while [ $count -eq 1 ]; do
@@ -894,36 +1235,36 @@ if [ ! "$nofpbx" ]; then
     if [ $exit_status -eq 0 ]; then
       break
     else
-      log "명령 'fwconsole ma refreshsignatures'가 종료 상태 $exit_status로 실행에 실패했습니다. 백그라운드 작업으로 실행"
+      log "Command 'fwconsole ma refreshsignatures' failed to execute with exit status $exit_status, running as a background job"
       refresh_signatures &
-      log "나머지 스크립트 실행 계속"
+      log "Continuing the remaining script execution"
       break
     fi
   done
 fi
 
-setCurrentStep "FreePBX 17 설치가 성공적으로 완료되었습니다."
+setCurrentStep "FreePBX 17 Installation finished successfully."
 
-############ 설치 후 검증 ############################################
-# 설치 후 검증 명령
-# 0이 아닌 종료 코드를 만났을 때 스크립트 자동 종료를 방지하기 위해 자동 스크립트 종료 비활성화
+############ POST INSTALL VALIDATION ############################################
+# Commands for post-installation validation
+# Disable automatic script termination upon encountering non-zero exit code to prevent premature termination.
 set +e
-setCurrentStep "설치 후 검증"
+setCurrentStep "Post-installation validation"
 
 check_services
 
 check_php_version
 
 if [ ! "$nofpbx" ] ; then
- check_freepbx
+  check_freepbx
 fi
 
 check_asterisk
 
 execution_time="$(($(date +%s) - start))"
-message "전체 스크립트 실행 시간: $execution_time"
-message "$host $kernel에 대한 FreePBX 17 설치 프로세스 완료"
-message "FreePBX 커뮤니티 포럼에 참여하세요: https://community.freepbx.org/ ";
+message "Total script Execution Time: $execution_time"
+message "Finished FreePBX 17 installation process for $host $kernel"
+message "Join us on the FreePBX Community Forum: https://community.freepbx.org/ "
 
 if [ ! "$nofpbx" ] ; then
   fwconsole motd
